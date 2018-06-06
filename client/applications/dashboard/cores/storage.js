@@ -3,6 +3,7 @@
  * 当收到消息，通知storage更新数据，当数据更新后，通知具体的module更新
  */
 
+const _ = require('lodash');
 const RSVP = require('rsvp');
 const Promise = RSVP.Promise;
 const msgEvent = require('./msg_event');
@@ -50,9 +51,11 @@ const map = {
 };
 
 function Storage() {
-  let that = this;
-  this.cache = [];
-  msgEvent.on('message', function(data) {
+  this.cache = {};
+  this.pendingRequests = [];
+  this.pendingMessages = [];
+  this.isIdle = true;
+  msgEvent.on('message', (data) => {
     let type = data.resource_type,
       list = [];
 
@@ -61,32 +64,48 @@ function Storage() {
     } else {
       list = [type];
     }
-
-    that.getList(list, true).then(function() {
-      msgEvent.emit('dataChange', data);
-    });
+    this.pendingRequests = _.union(this.pendingRequests, list);
+    this.pendingMessages.push(data);
+    if (this.isIdle) {
+      this.isIdle = false;
+      this.fireRequests();
+    }
   });
 }
 
 Storage.prototype = {
+  fireRequests: function() {
+    const list = this.pendingRequests.slice();
+    const messages = this.pendingMessages.slice();
+    this.pendingRequests = [];
+    this.pendingMessages = [];
+    this.getList(list, true).then(() => {
+      messages.forEach(m => {
+        msgEvent.emit('dataChange', m);
+      });
+    }).finally(() => {
+      if (this.pendingRequests.length > 0) {
+        this.fireRequests();
+      } else {
+        this.isIdle = true;
+      }
+    });
+  },
   getList: function(typeList, forced) {
     let that = this,
       promises = {};
 
     typeList.forEach((type) => {
-      if (!forced) {
-        if (that.cache[type]) {
-          promises[type] = new Promise(function(resolve, reject) {
-            resolve(that.cache[type]);
-          });
-          return;
-        }
+      if (!forced && that.cache[type]) {
+        promises[type] = new Promise(function(resolve, reject) {
+          resolve(that.cache[type]);
+        });
+      } else {
+        promises[type] = that['get' + type[0].toUpperCase() + type.slice(1).replace('_', '') + 'List']().then(function(data) {
+          that.cache[type] = data;
+          return data;
+        });
       }
-      promises[type] = that['get' + type[0].toUpperCase() + type.slice(1).replace('_', '') + 'List']().then(function(data) {
-        that.cache[type] = data;
-        return data;
-      });
-
     });
 
     return RSVP.hash(promises);
